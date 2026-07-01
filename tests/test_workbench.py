@@ -1,6 +1,7 @@
 import pandas as pd
 
 from earnings_signal.workbench import (
+    apply_numeric_filters,
     apply_universe_filters,
     calculate_dcf,
     choose_scatter_chart,
@@ -76,6 +77,28 @@ def test_text_filters_treat_input_as_literal_text():
     filtered = apply_universe_filters(frame, note="A+B")
 
     assert filtered["stock_code"].tolist() == ["000002.SZ"]
+
+
+def test_numeric_filters_stack_min_and_max_conditions():
+    frame = pd.DataFrame(
+        [
+            {"stock_code": "000001.SZ", "market_cap_100m": 2000, "cash_100m": 500, "interest_bearing_debt_100m": 100},
+            {"stock_code": "000002.SZ", "market_cap_100m": 300, "cash_100m": 600, "interest_bearing_debt_100m": 50},
+            {"stock_code": "000003.SZ", "market_cap_100m": 2400, "cash_100m": 100, "interest_bearing_debt_100m": 20},
+            {"stock_code": "000004.SZ", "market_cap_100m": 2100, "cash_100m": 550, "interest_bearing_debt_100m": 900},
+        ]
+    )
+
+    filtered = apply_numeric_filters(
+        frame,
+        [
+            {"column": "market_cap_100m", "min_value": "1000", "max_value": ""},
+            {"column": "cash_100m", "min_value": 300, "max_value": None},
+            {"column": "interest_bearing_debt_100m", "max_value": "200"},
+        ],
+    )
+
+    assert filtered["stock_code"].tolist() == ["000001.SZ"]
 
 
 def test_scatter_missing_columns_returns_missing_list():

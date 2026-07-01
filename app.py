@@ -22,6 +22,7 @@ from earnings_signal.workbench import (
     REQUIRED_UNIVERSE_COLUMNS,
     REQUIRED_VALUATION_COLUMNS,
     SCATTER_SPECS,
+    apply_numeric_filters,
     apply_universe_filters,
     calculate_dcf,
     choose_scatter_chart,
@@ -40,6 +41,7 @@ OUTPUT_DIR = ROOT / "output"
 DEMO_DIR = OUTPUT_DIR / "demo"
 STREAMLIT_DZH_DIR = OUTPUT_DIR / "streamlit" / "dzh"
 STREAMLIT_NOTES_PATH = OUTPUT_DIR / "streamlit" / "stock_notes.json"
+STREAMLIT_MARKS_PATH = OUTPUT_DIR / "streamlit" / "stock_marks.json"
 TEMPLATE_PATHS = template_paths(ROOT)
 IFIND_CACHE_PATHS = ifind_cache_paths(ROOT)
 
@@ -85,23 +87,119 @@ DISPLAY_COLUMNS = {
     "stock_name": "股票名称",
     "track": "赛道",
     "note": "备注",
+    "concept_tag": "概念标注",
     "sw_l2": "Wind2级行业",
     "sw_l3": "Wind3级行业",
     "style": "所属风格",
+    "long_list": "多头名单",
+    "short_list": "空头名单",
+    "watch_list": "观察名单",
+    "holding_list": "持仓名单",
+    "peer_list": "同业名单",
+    "list_date": "上市日期",
     "price": "股价",
     "market_cap_100m": "总市值(亿)",
+    "profit_1y_100m": "Profit_1Y(亿)",
     "fcff_profit_pct": "FCFF/Profit%",
     "dividend_payout_pct": "股利支付率%",
+    "perpetual_growth_pct": "永续增长率%",
+    "discount_rate_pct": "折现率%",
+    "cash_100m": "现金(亿)",
+    "non_core_assets_100m": "非核心资产(亿)",
+    "interest_bearing_debt_100m": "带息债务(亿)",
+    "parent_equity_ratio_pct": "归母权益占比%",
     "dcf_per_share_value": "DCF每股价值",
     "dcf_safety_price": "DCF安全边际对应价",
     "dcf_current_safety_margin_pct": "DCF当前安全边际%",
+    "dcf_equity_value_100m": "DCF权益价值(亿)",
     "roic_pct": "ROIC%",
     "safety_margin_pct": "安全边际%",
+    "safety_margin_pct_peer": "同业安全边际%",
+    "dcf_auto_safety_margin_pct": "DCF自动安全边际%",
     "fcff_yield_pct": "FCFF收益率%",
     "irr_worst_pct": "IRR_WorseCase%",
     "roe_pct": "ROE%",
     "pb": "PB",
     "dividend_yield_pct": "股息率%",
+    "risk_budget_pct": "风险预算%",
+    "absolute_return_pct": "绝对收益%",
+    "relative_return_pct": "相对收益%",
+}
+MARKED_DISPLAY_COLUMN = "标记"
+NUMERIC_FILTER_SLOTS = 5
+NUMERIC_FILTER_COLUMNS = [
+    "price",
+    "market_cap_100m",
+    "profit_1y_100m",
+    "fcff_profit_pct",
+    "dividend_payout_pct",
+    "perpetual_growth_pct",
+    "discount_rate_pct",
+    "cash_100m",
+    "non_core_assets_100m",
+    "interest_bearing_debt_100m",
+    "parent_equity_ratio_pct",
+    "dcf_per_share_value",
+    "dcf_safety_price",
+    "dcf_current_safety_margin_pct",
+    "dcf_equity_value_100m",
+    "roic_pct",
+    "safety_margin_pct",
+    "safety_margin_pct_peer",
+    "dcf_auto_safety_margin_pct",
+    "fcff_yield_pct",
+    "irr_worst_pct",
+    "roe_pct",
+    "pb",
+    "dividend_yield_pct",
+    "risk_budget_pct",
+    "absolute_return_pct",
+    "relative_return_pct",
+]
+KRI_COLUMN_HELP = {
+    "日期": "本行数据快照日期；同一股票会取不晚于筛选日期的最新记录。",
+    "股票代码": "证券交易代码，用于精确定位标的和跨表关联。",
+    "股票名称": "证券简称，用于人工识别和关键词检索。",
+    "赛道": "研究分组或业务赛道，用于同类公司横向筛选。",
+    "备注": "本地备注字段；新的重点关注请优先使用“标记”列。",
+    "标记": "本地关注标记；勾选后保存，会写入本机缓存并随当前页展示。",
+    "概念标注": "题材或业务概念标签，用于补充行业分类之外的横向筛选。",
+    "Wind2级行业": "二级行业分类，用于行业内比较和估值分组。",
+    "Wind3级行业": "三级行业分类，用于更细颗粒度的同行筛选。",
+    "所属风格": "估值或交易风格标签，例如低PB、成长、红利等。",
+    "多头名单": "是否进入多头候选池，用于记录优先研究方向。",
+    "空头名单": "是否进入空头或负面观察池，用于记录需回避或跟踪风险的标的。",
+    "观察名单": "是否进入观察池，用于后续跟踪但暂不下结论的标的。",
+    "持仓名单": "是否属于现有持仓或重点持仓跟踪范围。",
+    "同业名单": "是否作为同行可比样本，用于估值和经营质量对照。",
+    "上市日期": "证券上市日期，可辅助判断样本历史长度和财务可比性。",
+    "股价": "当前或缓存快照股价，是估值安全边际计算的输入。",
+    "总市值(亿)": "总市值，单位亿元，用于规模、流动性和可比公司筛选。",
+    "Profit_1Y(亿)": "DCF 使用的下一年度利润预测，单位亿元。",
+    "FCFF/Profit%": "自由现金流与利润的比例，衡量利润转现金流能力。",
+    "股利支付率%": "分红占利润比例，用于判断股东回报强度和持续性。",
+    "永续增长率%": "DCF 永续阶段增长假设，过高会显著放大估值。",
+    "折现率%": "DCF 折现率假设，反映资金成本和业务风险补偿。",
+    "现金(亿)": "公司现金及等价资产，DCF 权益价值加项。",
+    "非核心资产(亿)": "可独立估值或处置的非核心资产，DCF 权益价值加项。",
+    "带息债务(亿)": "有息负债规模，DCF 权益价值扣减项。",
+    "归母权益占比%": "权益价值归属于母公司股东的比例。",
+    "DCF每股价值": "基于当前 DCF 假设计算出的每股内在价值。",
+    "DCF安全边际对应价": "达到目标安全边际时对应的买入价。",
+    "DCF当前安全边际%": "当前价格相对 DCF 每股价值的折价幅度。",
+    "DCF权益价值(亿)": "DCF 估算的归母权益价值，单位亿元。",
+    "ROIC%": "投入资本回报率，衡量业务质量和资本效率。",
+    "安全边际%": "相对行业 PB 中位数的折价安全边际。",
+    "同业安全边际%": "来自同业指标表的安全边际字段，用于与主安全边际口径交叉检查。",
+    "DCF自动安全边际%": "基于自动估值字段得到的 DCF 安全边际参考值。",
+    "FCFF收益率%": "自由现金流除以总市值，衡量现金流收益率。",
+    "IRR_WorseCase%": "保守口径预期回报，当前近似为 FCFF 收益率加永续增长率。",
+    "ROE%": "净资产收益率，金融和低PB公司对比时尤其重要。",
+    "PB": "市净率，用于资产型、金融和周期公司估值比较。",
+    "股息率%": "现金分红收益率，用于红利质量和防御性筛选。",
+    "风险预算%": "组合层面的风险预算或最大风险暴露参考。",
+    "绝对收益%": "以个股自身价格或估值为基准的绝对收益测算。",
+    "相对收益%": "相对基准或可比组合的超额收益测算。",
 }
 
 
@@ -320,6 +418,25 @@ def save_note_overrides(overrides: dict[str, str]) -> None:
     STREAMLIT_NOTES_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def load_mark_overrides() -> set[str]:
+    if not STREAMLIT_MARKS_PATH.exists():
+        return set()
+    try:
+        raw = json.loads(STREAMLIT_MARKS_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return set()
+    if isinstance(raw, list):
+        return {str(code).strip() for code in raw if str(code).strip()}
+    if isinstance(raw, dict):
+        return {str(code).strip() for code, marked in raw.items() if marked and str(code).strip()}
+    return set()
+
+
+def save_mark_overrides(marks: set[str]) -> None:
+    STREAMLIT_MARKS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    STREAMLIT_MARKS_PATH.write_text(json.dumps(sorted(marks), ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 def apply_note_overrides(frame: pd.DataFrame, overrides: dict[str, str]) -> pd.DataFrame:
     if frame.empty or "stock_code" not in frame.columns:
         return frame
@@ -331,72 +448,90 @@ def apply_note_overrides(frame: pd.DataFrame, overrides: dict[str, str]) -> pd.D
     return view
 
 
-def _normalize_marked_note(note: Any, marked: bool) -> str:
-    note_text = "" if note is None else str(note).strip()
-    if marked:
-        return "⭐" if not note_text else note_text
-    return "" if note_text == "⭐" else note_text
+def apply_mark_overrides(frame: pd.DataFrame, marks: set[str]) -> pd.DataFrame:
+    if frame.empty or "stock_code" not in frame.columns:
+        return frame
+    view = frame.copy()
+    legacy_star = view.get("note", pd.Series("", index=view.index)).fillna("").astype(str).str.strip().eq("⭐")
+    view["marked"] = view["stock_code"].astype(str).isin(marks) | legacy_star
+    return view
 
 
-def render_note_editor(page_view: pd.DataFrame) -> None:
+def table_column_config(display: pd.DataFrame) -> dict[str, Any]:
+    config: dict[str, Any] = {}
+    for column in display.columns:
+        help_text = KRI_COLUMN_HELP.get(column, "本地缓存字段，用于筛选、横向比较或导出留痕。")
+        if column == MARKED_DISPLAY_COLUMN:
+            config[column] = st.column_config.CheckboxColumn(column, help=help_text, width="small")
+        elif pd.api.types.is_numeric_dtype(display[column]):
+            config[column] = st.column_config.NumberColumn(column, help=help_text, format="%.2f")
+        else:
+            config[column] = st.column_config.TextColumn(column, help=help_text)
+    return config
+
+
+def marker_editor_key(page_view: pd.DataFrame) -> str:
     if page_view.empty or "stock_code" not in page_view.columns:
-        return
-    if "note" not in page_view.columns:
-        return
-    st.markdown('<div class="section-title">备注打标</div>', unsafe_allow_html=True)
-    st.markdown('<div class="dense-note">可直接在“备注”里写字，也可以打勾快速加/去“⭐”；保存后会写入本地 cache 并参与筛选与导出。</div>', unsafe_allow_html=True)
-    note_view = page_view[["stock_code", "stock_name", "note"]].copy()
-    note_view["marked"] = note_view["note"].astype(str).str.strip() == "⭐"
-    if note_view["marked"].sum() == 0 and note_view["note"].astype(str).str.strip().ne("").any():
-        # keep existing manual notes readable even if not using star tag
-        note_view["marked"] = False
-    edited = st.data_editor(
-        note_view,
-        hide_index=True,
-        use_container_width=True,
-        key=f"note_editor:{note_view['stock_code'].iloc[0]}:{note_view['stock_code'].iloc[-1]}",
-        num_rows="fixed",
-        disabled=["stock_code", "stock_name"],
-        column_config={
-            "stock_code": st.column_config.TextColumn("股票代码"),
-            "stock_name": st.column_config.TextColumn("股票名称"),
-            "note": st.column_config.TextColumn("备注"),
-            "marked": st.column_config.CheckboxColumn("勾选"),
-        },
-    )
-    col1, col2 = st.columns([0.18, 0.82])
-    with col1:
-        if st.button("保存当前页备注", key=f"note_save:{note_view['stock_code'].iloc[0]}:{note_view['stock_code'].iloc[-1]}"):
-            overrides = load_note_overrides()
-            changed = False
-            for _, row in edited.iterrows():
-                code = str(row["stock_code"]).strip()
-                normalized_note = _normalize_marked_note(row.get("note", ""), bool(row.get("marked")))
-                if normalized_note:
-                    if overrides.get(code) != normalized_note:
-                        overrides[code] = normalized_note
-                        changed = True
-                elif code in overrides:
-                    overrides.pop(code, None)
-                    changed = True
-            if changed:
-                save_note_overrides(overrides)
-                st.success("已保存到本地备注")
-            else:
-                st.info("当前页无变更")
-    with col2:
-        if st.button("清空当前页备注勾标", key=f"note_clear:{note_view['stock_code'].iloc[0]}:{note_view['stock_code'].iloc[-1]}"):
-            overrides = load_note_overrides()
-            changed = False
-            for code in edited["stock_code"].astype(str):
-                if code in overrides:
-                    overrides.pop(code, None)
-                    changed = True
-            if changed:
-                save_note_overrides(overrides)
-                st.success("已清空当前页缓存备注")
-            else:
-                st.info("当前页没有本地备注可清空")
+        return "universe_marker_editor:empty"
+    return f"universe_marker_editor:{page_view['stock_code'].iloc[0]}:{page_view['stock_code'].iloc[-1]}"
+
+
+def add_marker_display_column(display: pd.DataFrame, page_view: pd.DataFrame) -> pd.DataFrame:
+    if display.empty or "stock_code" not in page_view.columns:
+        return display
+    marked_values = page_view.get("marked", pd.Series(False, index=page_view.index)).fillna(False).astype(bool).tolist()
+    result = display.copy()
+    insert_at = min(3, len(result.columns))
+    if MARKED_DISPLAY_COLUMN in result.columns:
+        result[MARKED_DISPLAY_COLUMN] = marked_values
+    else:
+        result.insert(insert_at, MARKED_DISPLAY_COLUMN, marked_values)
+    return result
+
+
+def save_marker_edits(edited: pd.DataFrame) -> bool:
+    if MARKED_DISPLAY_COLUMN not in edited or "股票代码" not in edited:
+        return False
+    marks = load_mark_overrides()
+    notes = load_note_overrides()
+    changed = False
+    for _, row in edited.iterrows():
+        code = str(row["股票代码"]).strip()
+        if not code:
+            continue
+        marked = bool(row.get(MARKED_DISPLAY_COLUMN))
+        if marked and code not in marks:
+            marks.add(code)
+            changed = True
+        if not marked and code in marks:
+            marks.remove(code)
+            changed = True
+        if notes.get(code, "").strip() == "⭐":
+            notes.pop(code, None)
+            changed = True
+    if changed:
+        save_mark_overrides(marks)
+        save_note_overrides(notes)
+    return changed
+
+
+def clear_page_markers(edited: pd.DataFrame) -> bool:
+    if "股票代码" not in edited:
+        return False
+    marks = load_mark_overrides()
+    notes = load_note_overrides()
+    changed = False
+    for code in edited["股票代码"].astype(str).str.strip():
+        if code in marks:
+            marks.remove(code)
+            changed = True
+        if notes.get(code, "").strip() == "⭐":
+            notes.pop(code, None)
+            changed = True
+    if changed:
+        save_mark_overrides(marks)
+        save_note_overrides(notes)
+    return changed
 
 
 def workbench_fingerprint(paths: Any) -> tuple[tuple[str, int, int], ...]:
@@ -446,9 +581,15 @@ def render_universe_tab(master: pd.DataFrame) -> None:
         return
     st.markdown('<div class="section-title">基本面数据列表</div>', unsafe_allow_html=True)
     filters = render_universe_filters(master)
+    mark_filter = filters.pop("mark_filter", "全部")
+    numeric_filters = filters.pop("numeric_filters", [])
     note_overrides = load_note_overrides()
+    mark_overrides = load_mark_overrides()
     note_enriched_master = apply_note_overrides(master, note_overrides)
+    note_enriched_master = apply_mark_overrides(note_enriched_master, mark_overrides)
     view = apply_universe_filters(note_enriched_master, **filters)
+    view = apply_marker_filter(view, mark_filter)
+    view = apply_numeric_filters(view, numeric_filters)
 
     metric_cols = st.columns(6)
     metric_cols[0].metric("筛选结果", f"{len(view):,}")
@@ -460,23 +601,7 @@ def render_universe_tab(master: pd.DataFrame) -> None:
     metric_cols[5].metric("平均ROIC", f"{view['roic_pct'].mean():.1f}%" if "roic_pct" in view else "NA")
 
     page_view, page_meta = paginate_view(view, key_prefix="universe")
-    render_note_editor(page_view)
-    display = format_master_table(page_view)
-    left, right = st.columns([0.2, 2.8])
-    with left:
-        st.download_button(
-            "导出",
-            data=view.to_csv(index=False).encode("utf-8-sig"),
-            file_name="research_universe_filtered.csv",
-            mime="text/csv",
-            use_container_width=True,
-        )
-    with right:
-        st.markdown(
-            f'<div class="dense-note">当前渲染第 {page_meta["start"]}-{page_meta["end"]} 行 / 共 {page_meta["total"]} 行；导出仍包含全部筛选结果。</div>',
-            unsafe_allow_html=True,
-        )
-    st.dataframe(display, use_container_width=True, hide_index=True, height=470)
+    render_universe_table(page_view, page_meta, view)
 
 
 def render_universe_filters(master: pd.DataFrame) -> dict[str, Any]:
@@ -486,26 +611,190 @@ def render_universe_filters(master: pd.DataFrame) -> dict[str, Any]:
     selected_date = row1[0].date_input("日期", value=default_date)
     code = row1[1].text_input("代码", placeholder="股票代码")
     name = row1[2].text_input("名称", placeholder="股票名称")
-    track = row1[3].text_input("赛道", placeholder="消费")
-    note = row1[4].text_input("备注", placeholder="备注")
-    concept = row1[5].text_input("概念标注", placeholder="概念标注")
-    sw_l2 = row1[6].text_input("申万2级行业", placeholder="Wind2级行业")
+    track = row1[3].selectbox(
+        "赛道",
+        filter_options(master, "track"),
+        index=None,
+        placeholder="选择或输入赛道",
+        accept_new_options=True,
+    )
+    concept = row1[4].selectbox(
+        "概念标注",
+        filter_options(master, "concept_tag"),
+        index=None,
+        placeholder="选择或输入概念",
+        accept_new_options=True,
+    )
+    sw_l2 = row1[5].selectbox(
+        "申万2级行业",
+        filter_options(master, "sw_l2"),
+        index=None,
+        placeholder="选择或输入Wind2级行业",
+        accept_new_options=True,
+    )
+    sw_l3 = row1[6].selectbox(
+        "申万3级行业",
+        filter_options(master, "sw_l3"),
+        index=None,
+        placeholder="选择或输入Wind3级行业",
+        accept_new_options=True,
+    )
 
-    row2 = st.columns([2.0, 1.2])
+    row2 = st.columns([1.7, 0.7, 1.4])
     market_name = row2[0].radio("市场", list(MARKET_OPTIONS.keys()), horizontal=True, index=1)
-    search = row2[1].text_input("搜索", placeholder="任意关键词")
+    mark_filter = row2[1].selectbox("标记", ["全部", "仅标记", "未标记"], index=0)
+    search = row2[2].text_input("搜索", placeholder="任意关键词")
+    numeric_filters = render_numeric_filters(master)
     return {
         "date": selected_date,
         "code": code,
         "name": name,
-        "track": track,
-        "note": note,
-        "concept": concept,
-        "sw_l2": sw_l2,
-        "sw_l3": "",
+        "track": normalize_filter_value(track),
+        "note": "",
+        "concept": normalize_filter_value(concept),
+        "sw_l2": normalize_filter_value(sw_l2),
+        "sw_l3": normalize_filter_value(sw_l3),
         "market_name": market_name,
         "search": search,
+        "mark_filter": mark_filter,
+        "numeric_filters": numeric_filters,
     }
+
+
+def render_numeric_filters(master: pd.DataFrame) -> list[dict[str, Any]]:
+    options = numeric_filter_options(master)
+    if not options:
+        return []
+    filters: list[dict[str, Any]] = []
+    invalid_inputs: list[str] = []
+    with st.expander("数值筛选", expanded=True):
+        for index in range(NUMERIC_FILTER_SLOTS):
+            label_visibility = "visible" if index == 0 else "collapsed"
+            columns = st.columns([1.4, 1.0, 1.0])
+            selected_column = columns[0].selectbox(
+                "字段",
+                options,
+                index=None,
+                key=f"numeric_filter_column_{index}",
+                format_func=lambda column: DISPLAY_COLUMNS.get(column, column),
+                placeholder="选择数值列",
+                label_visibility=label_visibility,
+            )
+            min_text = columns[1].text_input(
+                "大于等于",
+                key=f"numeric_filter_min_{index}",
+                placeholder="下限",
+                label_visibility=label_visibility,
+            )
+            max_text = columns[2].text_input(
+                "小于等于",
+                key=f"numeric_filter_max_{index}",
+                placeholder="上限",
+                label_visibility=label_visibility,
+            )
+            if not selected_column:
+                continue
+            min_value, min_valid = parse_numeric_filter_input(min_text)
+            max_value, max_valid = parse_numeric_filter_input(max_text)
+            label = DISPLAY_COLUMNS.get(selected_column, selected_column)
+            if not min_valid:
+                invalid_inputs.append(f"{label} 下限")
+            if not max_valid:
+                invalid_inputs.append(f"{label} 上限")
+            if min_valid and max_valid and (min_value is not None or max_value is not None):
+                filters.append({"column": selected_column, "min_value": min_value, "max_value": max_value})
+        if invalid_inputs:
+            st.warning("已忽略无法识别的数值输入：" + "、".join(invalid_inputs))
+        action_columns = st.columns([0.7, 2.3])
+        action_columns[0].button("应用筛选", key="numeric_filter_apply", width="stretch")
+    return filters
+
+
+def numeric_filter_options(frame: pd.DataFrame) -> list[str]:
+    options: list[str] = []
+    for column in NUMERIC_FILTER_COLUMNS:
+        if column not in frame:
+            continue
+        values = pd.to_numeric(frame[column], errors="coerce")
+        if values.notna().any():
+            options.append(column)
+    return options
+
+
+def parse_numeric_filter_input(value: Any) -> tuple[float | None, bool]:
+    if value is None:
+        return None, True
+    text = str(value).strip().replace(",", "").replace("，", "")
+    if not text:
+        return None, True
+    try:
+        return float(text), True
+    except ValueError:
+        return None, False
+
+
+def filter_options(frame: pd.DataFrame, column: str) -> list[str]:
+    if column not in frame:
+        return []
+    values = frame[column].dropna().astype(str).str.strip()
+    values = values[values.ne("")]
+    return sorted(values.unique().tolist())
+
+
+def normalize_filter_value(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def apply_marker_filter(frame: pd.DataFrame, mark_filter: str) -> pd.DataFrame:
+    if frame.empty or "marked" not in frame or mark_filter == "全部":
+        return frame
+    marked = frame["marked"].fillna(False).astype(bool)
+    if mark_filter == "仅标记":
+        return frame[marked].reset_index(drop=True)
+    if mark_filter == "未标记":
+        return frame[~marked].reset_index(drop=True)
+    return frame
+
+
+def render_universe_table(page_view: pd.DataFrame, page_meta: dict[str, int], full_view: pd.DataFrame) -> None:
+    display = add_marker_display_column(format_master_table(page_view), page_view)
+    st.markdown(
+        f'<div class="dense-note">当前渲染第 {page_meta["start"]}-{page_meta["end"]} 行 / 共 {page_meta["total"]} 行；导出包含全部筛选结果。</div>',
+        unsafe_allow_html=True,
+    )
+    edited = st.data_editor(
+        display,
+        width="stretch",
+        hide_index=True,
+        height=470,
+        key=marker_editor_key(page_view),
+        num_rows="fixed",
+        disabled=[column for column in display.columns if column != MARKED_DISPLAY_COLUMN],
+        column_config=table_column_config(display),
+    )
+    action_cols = st.columns([0.9, 1.2, 0.75, 4.15])
+    with action_cols[0]:
+        if st.button("保存标记", key=f"marker_save:{marker_editor_key(page_view)}", width="stretch"):
+            if save_marker_edits(edited):
+                st.success("已保存本地标记")
+            else:
+                st.info("当前页标记无变更")
+    with action_cols[1]:
+        if st.button("清空当前页标记", key=f"marker_clear:{marker_editor_key(page_view)}", width="stretch"):
+            if clear_page_markers(edited):
+                st.success("已清空当前页标记")
+            else:
+                st.info("当前页没有本地标记可清空")
+    with action_cols[2]:
+        st.download_button(
+            "导出",
+            data=full_view.to_csv(index=False).encode("utf-8-sig"),
+            file_name="research_universe_filtered.csv",
+            mime="text/csv",
+            width="stretch",
+        )
 
 
 def render_dcf_tab(workbench: dict[str, pd.DataFrame]) -> None:
@@ -882,7 +1171,7 @@ def format_master_table(frame: pd.DataFrame) -> pd.DataFrame:
     if frame.empty:
         return frame
     columns = [col for col in DISPLAY_COLUMNS if col in frame.columns]
-    extra = [col for col in frame.columns if col not in columns and col not in {"market", "broad_index"}]
+    extra = [col for col in frame.columns if col not in columns and col not in {"market", "broad_index", "marked"}]
     ordered = columns + extra[:8]
     display = frame[ordered].copy()
     if "date" in display:

@@ -330,6 +330,39 @@ def apply_universe_filters(
     return view.reset_index(drop=True)
 
 
+def apply_numeric_filters(frame: pd.DataFrame, numeric_filters: list[dict[str, Any]]) -> pd.DataFrame:
+    view = frame.copy()
+    if view.empty:
+        return view
+    for item in numeric_filters:
+        column = str(item.get("column", "")).strip()
+        if not column or column not in view:
+            continue
+        min_value = optional_float(item.get("min_value"))
+        max_value = optional_float(item.get("max_value"))
+        if min_value is None and max_value is None:
+            continue
+        values = pd.to_numeric(view[column], errors="coerce")
+        mask = pd.Series(True, index=view.index)
+        if min_value is not None:
+            mask &= values.ge(min_value)
+        if max_value is not None:
+            mask &= values.le(max_value)
+        view = view[mask]
+    return view.reset_index(drop=True)
+
+
+def optional_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, str) and not value.strip():
+        return None
+    result = pd.to_numeric(value, errors="coerce")
+    if pd.isna(result):
+        return None
+    return float(result)
+
+
 def calculate_dcf(inputs: dict[str, Any]) -> DcfResult:
     price = to_float(inputs.get("price"), np.nan)
     profit_1y = to_float(inputs.get("profit_1y_100m"))
