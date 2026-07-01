@@ -8,15 +8,6 @@ import numpy as np
 import pandas as pd
 
 
-LIST_COLUMNS = {
-    "全名单": None,
-    "长名单": "long_list",
-    "短名单": "short_list",
-    "观察名单": "watch_list",
-    "持仓名单": "holding_list",
-    "对标名单": "peer_list",
-}
-
 MARKET_OPTIONS = {
     "全部市场": None,
     "A股和港股市场": {"A", "HK"},
@@ -29,11 +20,6 @@ REQUIRED_UNIVERSE_COLUMNS = {
     "stock_name",
     "track",
     "market",
-    "long_list",
-    "short_list",
-    "watch_list",
-    "holding_list",
-    "peer_list",
 }
 
 REQUIRED_VALUATION_COLUMNS = {
@@ -84,6 +70,13 @@ SCATTER_SPECS = {
         "x_threshold": 3.0,
         "y_threshold": 8.0,
     },
+}
+
+FALLBACK_SCATTER_CHARTS = {
+    "ROIC vs 安全边际": ("ROE/PB", "股息率 vs ROE/PB", "FCFF收益率 vs IRR_WorseCase"),
+    "FCFF收益率 vs IRR_WorseCase": ("ROIC vs 安全边际", "ROE/PB", "股息率 vs ROE/PB"),
+    "ROE/PB": ("股息率 vs ROE/PB", "ROIC vs 安全边际", "FCFF收益率 vs IRR_WorseCase"),
+    "股息率 vs ROE/PB": ("ROE/PB", "ROIC vs 安全边际", "FCFF收益率 vs IRR_WorseCase"),
 }
 
 
@@ -152,14 +145,10 @@ def normalize_universe(frame: pd.DataFrame) -> pd.DataFrame:
     frame["stock_code"] = frame["stock_code"].astype(str).str.strip()
     frame["stock_name"] = frame["stock_name"].astype(str).str.strip()
     frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
-    for column in ["long_list", "short_list", "watch_list", "holding_list", "peer_list"]:
-        if column not in frame:
-            frame[column] = ""
-        frame[column] = frame[column].map(as_flag)
     if "market" not in frame:
         frame["market"] = frame["stock_code"].map(infer_market)
     frame["market"] = frame["market"].fillna(frame["stock_code"].map(infer_market)).astype(str)
-    for column in ["track", "note", "concept_tag", "sw_l2", "sw_l3", "broad_index", "style"]:
+    for column in ["track", "note", "concept_tag", "sw_l2", "sw_l3", "style"]:
         if column not in frame:
             frame[column] = ""
     return frame
@@ -307,8 +296,6 @@ def apply_universe_filters(
     concept: str = "",
     sw_l2: str = "",
     sw_l3: str = "",
-    broad_index: str = "",
-    list_name: str = "全名单",
     market_name: str = "全部市场",
     search: str = "",
 ) -> pd.DataFrame:
@@ -330,20 +317,16 @@ def apply_universe_filters(
         "concept_tag": concept,
         "sw_l2": sw_l2,
         "sw_l3": sw_l3,
-        "broad_index": broad_index,
     }
     for column, value in text_filters.items():
         if value and column in view:
-            view = view[view[column].astype(str).str.contains(value, case=False, na=False)]
-    list_col = LIST_COLUMNS.get(list_name)
-    if list_col and list_col in view:
-        view = view[view[list_col].map(as_flag).eq("Y")]
+            view = view[view[column].astype(str).str.contains(value, case=False, na=False, regex=False)]
     markets = MARKET_OPTIONS.get(market_name)
     if markets and "market" in view:
         view = view[view["market"].isin(markets)]
     if search:
         search_blob = view.fillna("").astype(str).agg(" ".join, axis=1)
-        view = view[search_blob.str.contains(search, case=False, na=False)]
+        view = view[search_blob.str.contains(search, case=False, na=False, regex=False)]
     return view.reset_index(drop=True)
 
 
@@ -421,6 +404,38 @@ def prepare_scatter_data(frame: pd.DataFrame, chart_name: str) -> tuple[pd.DataF
     return data, [], spec
 
 
+def choose_scatter_chart(
+    frame: pd.DataFrame,
+    chart_name: str,
+) -> tuple[str, pd.DataFrame, list[str], dict[str, Any], str | None]:
+    scatter, missing, spec = prepare_scatter_data(frame, chart_name)
+    if not missing and not scatter.empty:
+        return chart_name, scatter, missing, spec, None
+
+    for fallback_name in FALLBACK_SCATTER_CHARTS.get(chart_name, ()):
+        fallback_scatter, fallback_missing, fallback_spec = prepare_scatter_data(frame, fallback_name)
+        if not fallback_missing and not fallback_scatter.empty:
+            return fallback_name, fallback_scatter, [], fallback_spec, chart_name
+
+    return chart_name, scatter, missing, spec, None
+
+
+def scatter_chart_availability(frame: pd.DataFrame) -> pd.DataFrame:
+    rows: list[dict[str, Any]] = []
+    for chart_name, spec in SCATTER_SPECS.items():
+        scatter, missing, _ = prepare_scatter_data(frame, chart_name)
+        rows.append(
+            {
+                "图形": chart_name,
+                "X字段": spec["x"],
+                "Y字段": spec["y"],
+                "可用样本": len(scatter),
+                "缺少字段": ", ".join(missing),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 def select_scatter_points(frame: pd.DataFrame, spec: dict[str, Any], max_points: int = 20, mode: str = "balanced") -> pd.DataFrame:
     if frame.empty:
         return frame
@@ -454,17 +469,6 @@ def valuation_row(valuation: pd.DataFrame, stock_code: str) -> dict[str, Any]:
     if rows.empty:
         return {}
     return rows.iloc[0].to_dict()
-
-
-def as_flag(value: Any) -> str:
-    if value is None or (isinstance(value, float) and np.isnan(value)):
-        return ""
-    text = str(value).strip().upper()
-    if text in {"Y", "YES", "TRUE", "1", "持有", "是"}:
-        return "Y"
-    if text in {"0", "FALSE", "N", "NO"}:
-        return ""
-    return text
 
 
 def infer_market(stock_code: Any) -> str:

@@ -3,6 +3,7 @@ import pandas as pd
 from earnings_signal.workbench import (
     apply_universe_filters,
     calculate_dcf,
+    choose_scatter_chart,
     normalize_peer_metrics,
     prepare_scatter_data,
     select_scatter_points,
@@ -48,20 +49,33 @@ def test_dcf_missing_price_does_not_become_full_safety_margin():
     assert pd.isna(result.summary["current_safety_margin_pct"])
 
 
-def test_list_and_market_filters_do_not_mutate_source():
+def test_date_and_market_filters_do_not_mutate_source():
     frame = pd.DataFrame(
         [
-            {"date": "2025-07-11", "stock_code": "000651.SZ", "stock_name": "格力电器", "track": "消费", "market": "A", "long_list": "Y", "watch_list": "Y"},
-            {"date": "2025-07-11", "stock_code": "0700.HK", "stock_name": "腾讯控股", "track": "互联网", "market": "HK", "long_list": "", "watch_list": "Y"},
-            {"date": "2025-07-11", "stock_code": "AAPL.US", "stock_name": "苹果", "track": "科技", "market": "US", "long_list": "Y", "watch_list": ""},
+            {"date": "2025-07-11", "stock_code": "000651.SZ", "stock_name": "格力电器", "track": "消费", "market": "A"},
+            {"date": "2025-07-11", "stock_code": "0700.HK", "stock_name": "腾讯控股", "track": "互联网", "market": "HK"},
+            {"date": "2025-07-11", "stock_code": "AAPL.US", "stock_name": "苹果", "track": "科技", "market": "US"},
         ]
     )
     original = frame.copy(deep=True)
 
-    filtered = apply_universe_filters(frame, list_name="长名单", market_name="A股和港股市场")
+    filtered = apply_universe_filters(frame, market_name="A股和港股市场")
 
-    assert filtered["stock_code"].tolist() == ["000651.SZ"]
+    assert filtered["stock_code"].tolist() == ["000651.SZ", "0700.HK"]
     pd.testing.assert_frame_equal(frame, original)
+
+
+def test_text_filters_treat_input_as_literal_text():
+    frame = pd.DataFrame(
+        [
+            {"stock_code": "000001.SZ", "stock_name": "平安银行", "track": "银行", "market": "A"},
+            {"stock_code": "000002.SZ", "stock_name": "万科A", "track": "地产", "market": "A", "note": "A+B"},
+        ]
+    )
+
+    filtered = apply_universe_filters(frame, note="A+B")
+
+    assert filtered["stock_code"].tolist() == ["000002.SZ"]
 
 
 def test_scatter_missing_columns_returns_missing_list():
@@ -86,6 +100,24 @@ def test_scatter_can_compute_roe_pb():
 
     assert not missing
     assert round(scatter.loc[0, "roe_pb"], 2) == 12.5
+
+
+def test_scatter_falls_back_when_requested_chart_has_no_usable_rows():
+    banks = normalize_peer_metrics(
+        pd.DataFrame(
+            [
+                {"stock_code": "600000.SH", "stock_name": "浦发银行", "track": "银行", "roe_pct": 10.8, "pb": 0.5},
+                {"stock_code": "600036.SH", "stock_name": "招商银行", "track": "银行", "roe_pct": 15.2, "pb": 0.9},
+            ]
+        )
+    )
+
+    chart_name, scatter, missing, _, fallback_from = choose_scatter_chart(banks, "ROIC vs 安全边际")
+
+    assert chart_name == "ROE/PB"
+    assert fallback_from == "ROIC vs 安全边际"
+    assert not missing
+    assert scatter["stock_code"].tolist() == ["600000.SH", "600036.SH"]
 
 
 def test_select_scatter_points_caps_at_twenty():

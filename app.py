@@ -18,16 +18,16 @@ from earnings_signal.io import extract_rows, read_table, write_json, write_rows_
 from earnings_signal.scoring import score_features
 from earnings_signal.ifind_workbench import ifind_cache_paths, ifind_workbench_paths, read_manifest
 from earnings_signal.workbench import (
-    LIST_COLUMNS,
     MARKET_OPTIONS,
     REQUIRED_UNIVERSE_COLUMNS,
     REQUIRED_VALUATION_COLUMNS,
     SCATTER_SPECS,
     apply_universe_filters,
     calculate_dcf,
+    choose_scatter_chart,
     financial_history_for_stock,
     load_workbench,
-    prepare_scatter_data,
+    scatter_chart_availability,
     select_scatter_points,
     template_paths,
     validate_columns,
@@ -39,6 +39,7 @@ ROOT = Path(__file__).parent
 OUTPUT_DIR = ROOT / "output"
 DEMO_DIR = OUTPUT_DIR / "demo"
 STREAMLIT_DZH_DIR = OUTPUT_DIR / "streamlit" / "dzh"
+STREAMLIT_NOTES_PATH = OUTPUT_DIR / "streamlit" / "stock_notes.json"
 TEMPLATE_PATHS = template_paths(ROOT)
 IFIND_CACHE_PATHS = ifind_cache_paths(ROOT)
 
@@ -66,6 +67,16 @@ SCATTER_SORT_OPTIONS = {
     "横轴最高": "x_desc",
     "市值最大": "market_cap",
 }
+SCATTER_FORMULAS = {
+    "ROIC vs 安全边际": "X = ROIC；Y = 行业内 PB 折价安全边际 = (行业PB中位数 - 公司PB) / 行业PB中位数 * 100%。银行等金融股通常没有 ROIC，系统会自动临时切到 ROE/PB。",
+    "FCFF收益率 vs IRR_WorseCase": "X = FCFF收益率 = FCFF / 总市值 * 100%；Y = IRR_WorseCase = FCFF收益率 + 永续增长率，目前默认永续增长率取 3%。",
+    "ROE/PB": "X = PB；Y = ROE。适合银行、保险等 ROIC 不稳定或不可比行业，左上方代表较低 PB 和较高 ROE。",
+    "股息率 vs ROE/PB": "X = 股息率；Y = ROE/PB = ROE / PB，用于比较红利质量和估值效率。",
+}
+
+
+def scatter_formula_help() -> str:
+    return "\n\n".join(f"{name}: {formula}" for name, formula in SCATTER_FORMULAS.items())
 
 
 DISPLAY_COLUMNS = {
@@ -73,13 +84,7 @@ DISPLAY_COLUMNS = {
     "stock_code": "股票代码",
     "stock_name": "股票名称",
     "track": "赛道",
-    "long_list": "长名单",
-    "short_list": "短名单",
-    "watch_list": "观察名单",
-    "holding_list": "持仓",
-    "peer_list": "对标名单",
     "note": "备注",
-    "broad_index": "所属宽基",
     "sw_l2": "Wind2级行业",
     "sw_l3": "Wind3级行业",
     "style": "所属风格",
@@ -126,13 +131,16 @@ st.markdown(
         background: var(--old-paper) !important;
         color: var(--old-ink) !important;
     }
-    [data-testid="stHeader"] {border-bottom: 1px solid rgba(165, 49, 34, 0.18);}
+    [data-testid="stHeader"] {
+        border-bottom: 1px solid rgba(165, 49, 34, 0.18);
+        min-height: 2.35rem;
+    }
     [data-testid="stSidebar"] {
         background: #efe4cb !important;
         border-right: 1px solid var(--old-line);
     }
     .block-container {
-        padding: 0.8rem 1rem 1.4rem 1rem;
+        padding: 2.45rem 1rem 1.4rem 1rem;
         max-width: 100%;
         background: var(--old-paper);
     }
@@ -294,6 +302,103 @@ def sidebar_data_status() -> None:
     st.sidebar.code("python -m earnings_signal.ifind_workbench --root . --max-mb 95", language="powershell")
 
 
+def load_note_overrides() -> dict[str, str]:
+    if not STREAMLIT_NOTES_PATH.exists():
+        return {}
+    try:
+        raw = json.loads(STREAMLIT_NOTES_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    return {str(code).strip(): str(text).strip() for code, text in raw.items() if text is not None}
+
+
+def save_note_overrides(overrides: dict[str, str]) -> None:
+    STREAMLIT_NOTES_PATH.parent.mkdir(parents=True, exist_ok=True)
+    payload = {code: note for code, note in sorted(overrides.items()) if note.strip()}
+    STREAMLIT_NOTES_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def apply_note_overrides(frame: pd.DataFrame, overrides: dict[str, str]) -> pd.DataFrame:
+    if frame.empty or "stock_code" not in frame.columns:
+        return frame
+    if "note" not in frame.columns:
+        frame = frame.copy()
+        frame["note"] = ""
+    view = frame.copy()
+    view["note"] = view["stock_code"].astype(str).map(overrides).fillna(view["note"]).fillna("")
+    return view
+
+
+def _normalize_marked_note(note: Any, marked: bool) -> str:
+    note_text = "" if note is None else str(note).strip()
+    if marked:
+        return "⭐" if not note_text else note_text
+    return "" if note_text == "⭐" else note_text
+
+
+def render_note_editor(page_view: pd.DataFrame) -> None:
+    if page_view.empty or "stock_code" not in page_view.columns:
+        return
+    if "note" not in page_view.columns:
+        return
+    st.markdown('<div class="section-title">备注打标</div>', unsafe_allow_html=True)
+    st.markdown('<div class="dense-note">可直接在“备注”里写字，也可以打勾快速加/去“⭐”；保存后会写入本地 cache 并参与筛选与导出。</div>', unsafe_allow_html=True)
+    note_view = page_view[["stock_code", "stock_name", "note"]].copy()
+    note_view["marked"] = note_view["note"].astype(str).str.strip() == "⭐"
+    if note_view["marked"].sum() == 0 and note_view["note"].astype(str).str.strip().ne("").any():
+        # keep existing manual notes readable even if not using star tag
+        note_view["marked"] = False
+    edited = st.data_editor(
+        note_view,
+        hide_index=True,
+        use_container_width=True,
+        key=f"note_editor:{note_view['stock_code'].iloc[0]}:{note_view['stock_code'].iloc[-1]}",
+        num_rows="fixed",
+        disabled=["stock_code", "stock_name"],
+        column_config={
+            "stock_code": st.column_config.TextColumn("股票代码"),
+            "stock_name": st.column_config.TextColumn("股票名称"),
+            "note": st.column_config.TextColumn("备注"),
+            "marked": st.column_config.CheckboxColumn("勾选"),
+        },
+    )
+    col1, col2 = st.columns([0.18, 0.82])
+    with col1:
+        if st.button("保存当前页备注", key=f"note_save:{note_view['stock_code'].iloc[0]}:{note_view['stock_code'].iloc[-1]}"):
+            overrides = load_note_overrides()
+            changed = False
+            for _, row in edited.iterrows():
+                code = str(row["stock_code"]).strip()
+                normalized_note = _normalize_marked_note(row.get("note", ""), bool(row.get("marked")))
+                if normalized_note:
+                    if overrides.get(code) != normalized_note:
+                        overrides[code] = normalized_note
+                        changed = True
+                elif code in overrides:
+                    overrides.pop(code, None)
+                    changed = True
+            if changed:
+                save_note_overrides(overrides)
+                st.success("已保存到本地备注")
+            else:
+                st.info("当前页无变更")
+    with col2:
+        if st.button("清空当前页备注勾标", key=f"note_clear:{note_view['stock_code'].iloc[0]}:{note_view['stock_code'].iloc[-1]}"):
+            overrides = load_note_overrides()
+            changed = False
+            for code in edited["stock_code"].astype(str):
+                if code in overrides:
+                    overrides.pop(code, None)
+                    changed = True
+            if changed:
+                save_note_overrides(overrides)
+                st.success("已清空当前页缓存备注")
+            else:
+                st.info("当前页没有本地备注可清空")
+
+
 def workbench_fingerprint(paths: Any) -> tuple[tuple[str, int, int], ...]:
     return tuple(
         (name, int(path.stat().st_mtime_ns), int(path.stat().st_size))
@@ -341,18 +446,21 @@ def render_universe_tab(master: pd.DataFrame) -> None:
         return
     st.markdown('<div class="section-title">基本面数据列表</div>', unsafe_allow_html=True)
     filters = render_universe_filters(master)
-    view = apply_universe_filters(master, **filters)
+    note_overrides = load_note_overrides()
+    note_enriched_master = apply_note_overrides(master, note_overrides)
+    view = apply_universe_filters(note_enriched_master, **filters)
 
     metric_cols = st.columns(6)
     metric_cols[0].metric("筛选结果", f"{len(view):,}")
     metric_cols[1].metric("赛道", f"{view['track'].nunique() if 'track' in view else 0:,}")
-    metric_cols[2].metric("观察名单", f"{int(view.get('watch_list', pd.Series(dtype=str)).eq('Y').sum())}")
-    metric_cols[3].metric("持仓", f"{int(view.get('holding_list', pd.Series(dtype=str)).eq('Y').sum())}")
+    metric_cols[2].metric("赛道覆盖", f"{len(view['track'].dropna().unique()) if 'track' in view else 0:,}")
+    metric_cols[3].metric("代码覆盖", f"{view['stock_code'].nunique() if 'stock_code' in view else 0:,}")
     safety_col = "safety_margin_pct" if "safety_margin_pct" in view else "dcf_current_safety_margin_pct"
     metric_cols[4].metric("平均安全边际", f"{view[safety_col].mean():.1f}%" if safety_col in view else "NA")
     metric_cols[5].metric("平均ROIC", f"{view['roic_pct'].mean():.1f}%" if "roic_pct" in view else "NA")
 
     page_view, page_meta = paginate_view(view, key_prefix="universe")
+    render_note_editor(page_view)
     display = format_master_table(page_view)
     left, right = st.columns([0.2, 2.8])
     with left:
@@ -374,7 +482,7 @@ def render_universe_tab(master: pd.DataFrame) -> None:
 def render_universe_filters(master: pd.DataFrame) -> dict[str, Any]:
     dates = pd.to_datetime(master["date"], errors="coerce") if "date" in master else pd.Series(dtype="datetime64[ns]")
     default_date = dates.max() if not dates.dropna().empty else pd.Timestamp.today()
-    row1 = st.columns([0.9, 1.0, 1.1, 1.0, 1.2, 1.2, 1.2, 1.2])
+    row1 = st.columns([0.9, 1.0, 1.1, 1.0, 1.2, 1.2, 1.2])
     selected_date = row1[0].date_input("日期", value=default_date)
     code = row1[1].text_input("代码", placeholder="股票代码")
     name = row1[2].text_input("名称", placeholder="股票名称")
@@ -382,12 +490,10 @@ def render_universe_filters(master: pd.DataFrame) -> dict[str, Any]:
     note = row1[4].text_input("备注", placeholder="备注")
     concept = row1[5].text_input("概念标注", placeholder="概念标注")
     sw_l2 = row1[6].text_input("申万2级行业", placeholder="Wind2级行业")
-    broad_index = row1[7].text_input("所属宽基", placeholder="所属宽基")
 
-    row2 = st.columns([2.0, 2.1, 1.2])
-    list_name = row2[0].radio("名单", list(LIST_COLUMNS.keys()), horizontal=True, index=0)
-    market_name = row2[1].radio("市场", list(MARKET_OPTIONS.keys()), horizontal=True, index=1)
-    search = row2[2].text_input("搜索", placeholder="任意关键词")
+    row2 = st.columns([2.0, 1.2])
+    market_name = row2[0].radio("市场", list(MARKET_OPTIONS.keys()), horizontal=True, index=1)
+    search = row2[1].text_input("搜索", placeholder="任意关键词")
     return {
         "date": selected_date,
         "code": code,
@@ -397,8 +503,6 @@ def render_universe_filters(master: pd.DataFrame) -> dict[str, Any]:
         "concept": concept,
         "sw_l2": sw_l2,
         "sw_l3": "",
-        "broad_index": broad_index,
-        "list_name": list_name,
         "market_name": market_name,
         "search": search,
     }
@@ -518,7 +622,7 @@ def render_scatter_tab(workbench: dict[str, pd.DataFrame]) -> None:
         return
     st.markdown('<div class="section-title">交叉评估图</div>', unsafe_allow_html=True)
     controls = st.columns([1.1, 1.0, 1.0, 1.2])
-    chart_name = controls[0].selectbox("图形", list(SCATTER_SPECS.keys()))
+    chart_name = controls[0].selectbox("图形", list(SCATTER_SPECS.keys()), help=scatter_formula_help())
     track_options = ["全部"] + sorted(master["track"].dropna().astype(str).unique().tolist())
     track = controls[1].selectbox("赛道", track_options)
     market = controls[2].selectbox("市场", list(MARKET_OPTIONS.keys()), index=1)
@@ -535,14 +639,31 @@ def render_scatter_tab(workbench: dict[str, pd.DataFrame]) -> None:
         on="stock_code",
         how="inner",
     )
-    scatter, missing, spec = prepare_scatter_data(scatter_source, chart_name)
-    if missing:
-        st.warning(f"当前数据缺少字段：{', '.join(missing)}")
+    raw_candidate_count = len(scatter_source)
+    effective_chart_name, scatter, missing, spec, fallback_from = choose_scatter_chart(scatter_source, chart_name)
+    if fallback_from:
+        st.info(
+            f"当前筛选下 `{fallback_from}` 没有可用样本，已临时显示 `{effective_chart_name}`。"
+            "银行/金融股通常没有可比 ROIC，用 ROE/PB 更合适。"
+        )
+    if missing or scatter.empty:
+        if missing:
+            st.warning(f"当前数据缺少字段：{', '.join(missing)}")
+        else:
+            st.warning(
+                f"当前筛选下有 {raw_candidate_count:,} 只候选股票，但 `{chart_name}` 所需字段没有可用值。"
+                "请切换图形，或先确认本地 peer_metrics 数据字段。"
+            )
+        st.dataframe(scatter_chart_availability(scatter_source), use_container_width=True, hide_index=True, height=220)
         return
     candidate_count = len(scatter)
     scatter = select_scatter_points(scatter, spec, max_points=max_points, mode=SCATTER_SORT_OPTIONS[sort_label])
     display_controls[2].markdown(
-        f'<div class="dense-note">候选样本 {candidate_count:,} 只，图中显示 {len(scatter):,} 只。先用筛选缩小赛道，再看排序后的代表样本。</div>',
+        f'<div class="dense-note">筛选后 {raw_candidate_count:,} 只，可用于本图 {candidate_count:,} 只，图中显示 {len(scatter):,} 只。先用筛选缩小赛道，再看排序后的代表样本。</div>',
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        f'<div class="dense-note">公式：{SCATTER_FORMULAS.get(effective_chart_name, "")}</div>',
         unsafe_allow_html=True,
     )
     fig = px.scatter(
@@ -577,7 +698,7 @@ def render_scatter_tab(workbench: dict[str, pd.DataFrame]) -> None:
     )
     fig.update_layout(
         margin=dict(l=20, r=20, t=45, b=20),
-        title=dict(text=chart_name, font=dict(color=PALETTE["ink"], size=20)),
+        title=dict(text=effective_chart_name, font=dict(color=PALETTE["ink"], size=20)),
         paper_bgcolor=PALETTE["paper"],
         plot_bgcolor="rgba(255, 249, 234, 0.72)",
         font=dict(color=PALETTE["ink"]),
@@ -761,7 +882,7 @@ def format_master_table(frame: pd.DataFrame) -> pd.DataFrame:
     if frame.empty:
         return frame
     columns = [col for col in DISPLAY_COLUMNS if col in frame.columns]
-    extra = [col for col in frame.columns if col not in columns and col not in {"market"}]
+    extra = [col for col in frame.columns if col not in columns and col not in {"market", "broad_index"}]
     ordered = columns + extra[:8]
     display = frame[ordered].copy()
     if "date" in display:
