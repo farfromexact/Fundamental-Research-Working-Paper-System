@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.pytest-tmp/
+pytest-cache-files-*/
+test_artifacts/
+output/
+data/*
+!data/templates/
+!data/templates/**
+!data/ifind_workbench/
+!data/ifind_workbench/*.parquet
+!data/ifind_workbench/manifest.json
+*.log

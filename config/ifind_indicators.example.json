@@ -1,0 +1,38 @@
+{
+  "notes": "Fill these indicator names after confirming the available iFinD terminal fields in the local account. Do not store credentials here.",
+  "universe": {
+    "source": "THS_DataPool",
+    "pool_name": "A-share universe",
+    "fields": {
+      "stock_code": "ths_code",
+      "stock_name": "ths_name",
+      "industry": "ths_industry_sw",
+      "list_date": "ths_list_date",
+      "is_st": "ths_is_st",
+      "suspend_status": "ths_suspend_status"
+    }
+  },
+  "consensus": {
+    "source": "THS_BasicData",
+    "fields": {
+      "period_end": "forecast_period",
+      "forecast_date": "forecast_date",
+      "consensus_net_profit": "consensus_net_profit",
+      "consensus_revenue": "consensus_revenue",
+      "consensus_eps": "consensus_eps",
+      "analyst_count": "analyst_count",
+      "forecast_std": "forecast_std"
+    }
+  },
+  "actuals": {
+    "source": "THS_BasicData",
+    "fields": {
+      "period_end": "report_period",
+      "announce_date": "announce_date",
+      "actual_net_profit": "net_profit_parent",
+      "actual_revenue": "operating_revenue",
+      "actual_eps": "basic_eps"
+    }
+  }
+}
+
