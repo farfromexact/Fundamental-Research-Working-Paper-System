@@ -28,6 +28,7 @@ from earnings_signal.workbench import (
     financial_history_for_stock,
     load_workbench,
     prepare_scatter_data,
+    select_scatter_points,
     template_paths,
     validate_columns,
     valuation_row,
@@ -57,6 +58,14 @@ PLOTLY_COLORS = [
     PALETTE["yellow"],
     PALETTE["ink"],
 ]
+
+PAGES = ["股票池底稿", "单股DCF", "交叉评估", "证据与评分", "本地数据"]
+SCATTER_SORT_OPTIONS = {
+    "综合靠前": "balanced",
+    "纵轴最高": "y_desc",
+    "横轴最高": "x_desc",
+    "市值最大": "market_cap",
+}
 
 
 DISPLAY_COLUMNS = {
@@ -252,20 +261,22 @@ def main() -> None:
     st.caption("本地 iFinD 全 A 宽表、单股 DCF 推演、二维交叉评估、调研研报证据")
 
     sidebar_data_status()
-    workbench = load_workbench_from_local()
-    scores, labels, group_summary, coverage = load_score_auxiliary()
-    evidence = load_evidence_rows(include_existing_catl=True)
+    page = st.radio("页面", PAGES, horizontal=True, label_visibility="collapsed", key="active_page")
 
-    tabs = st.tabs(["股票池底稿", "单股DCF", "交叉评估", "证据与评分", "本地数据"])
-    with tabs[0]:
-        render_universe_tab(workbench["master"])
-    with tabs[1]:
-        render_dcf_tab(workbench)
-    with tabs[2]:
-        render_scatter_tab(workbench)
-    with tabs[3]:
+    if page == "证据与评分":
+        scores, labels, group_summary, coverage = load_score_auxiliary()
+        evidence = load_evidence_rows(include_existing_catl=True)
         render_evidence_score_tab(scores, labels, group_summary, coverage, evidence)
-    with tabs[4]:
+        return
+
+    workbench = load_workbench_from_local()
+    if page == "股票池底稿":
+        render_universe_tab(workbench["master"])
+    elif page == "单股DCF":
+        render_dcf_tab(workbench)
+    elif page == "交叉评估":
+        render_scatter_tab(workbench)
+    elif page == "本地数据":
         render_template_tab(workbench)
 
 
@@ -283,10 +294,25 @@ def sidebar_data_status() -> None:
     st.sidebar.code("python -m earnings_signal.ifind_workbench --root . --max-mb 95", language="powershell")
 
 
+def workbench_fingerprint(paths: Any) -> tuple[tuple[str, int, int], ...]:
+    return tuple(
+        (name, int(path.stat().st_mtime_ns), int(path.stat().st_size))
+        for name, path in vars(paths).items()
+        if isinstance(path, Path) and path.exists()
+    )
+
+
 def load_workbench_from_local() -> dict[str, pd.DataFrame]:
     if IFIND_CACHE_PATHS.universe.exists() and IFIND_CACHE_PATHS.valuation.exists() and IFIND_CACHE_PATHS.peer_metrics.exists():
-        return load_workbench(ifind_workbench_paths(ROOT))
-    return load_workbench(TEMPLATE_PATHS)
+        paths = ifind_workbench_paths(ROOT)
+        return load_workbench_cached("ifind", workbench_fingerprint(paths))
+    return load_workbench_cached("templates", workbench_fingerprint(TEMPLATE_PATHS))
+
+
+@st.cache_data(show_spinner=False)
+def load_workbench_cached(source: str, fingerprint: tuple[tuple[str, int, int], ...]) -> dict[str, pd.DataFrame]:
+    paths = ifind_workbench_paths(ROOT) if source == "ifind" else TEMPLATE_PATHS
+    return load_workbench(paths)
 
 
 @st.cache_data(show_spinner=False)
@@ -322,10 +348,12 @@ def render_universe_tab(master: pd.DataFrame) -> None:
     metric_cols[1].metric("赛道", f"{view['track'].nunique() if 'track' in view else 0:,}")
     metric_cols[2].metric("观察名单", f"{int(view.get('watch_list', pd.Series(dtype=str)).eq('Y').sum())}")
     metric_cols[3].metric("持仓", f"{int(view.get('holding_list', pd.Series(dtype=str)).eq('Y').sum())}")
-    metric_cols[4].metric("平均安全边际", f"{view['dcf_current_safety_margin_pct'].mean():.1f}%" if "dcf_current_safety_margin_pct" in view else "NA")
+    safety_col = "safety_margin_pct" if "safety_margin_pct" in view else "dcf_current_safety_margin_pct"
+    metric_cols[4].metric("平均安全边际", f"{view[safety_col].mean():.1f}%" if safety_col in view else "NA")
     metric_cols[5].metric("平均ROIC", f"{view['roic_pct'].mean():.1f}%" if "roic_pct" in view else "NA")
 
-    display = format_master_table(view)
+    page_view, page_meta = paginate_view(view, key_prefix="universe")
+    display = format_master_table(page_view)
     left, right = st.columns([0.2, 2.8])
     with left:
         st.download_button(
@@ -336,7 +364,10 @@ def render_universe_tab(master: pd.DataFrame) -> None:
             use_container_width=True,
         )
     with right:
-        st.markdown('<div class="dense-note">点击列头可排序，表格支持横向滚动。筛选不会改动原始 CSV。</div>', unsafe_allow_html=True)
+        st.markdown(
+            f'<div class="dense-note">当前渲染第 {page_meta["start"]}-{page_meta["end"]} 行 / 共 {page_meta["total"]} 行；导出仍包含全部筛选结果。</div>',
+            unsafe_allow_html=True,
+        )
     st.dataframe(display, use_container_width=True, hide_index=True, height=470)
 
 
@@ -492,11 +523,15 @@ def render_scatter_tab(workbench: dict[str, pd.DataFrame]) -> None:
     track = controls[1].selectbox("赛道", track_options)
     market = controls[2].selectbox("市场", list(MARKET_OPTIONS.keys()), index=1)
     name_filter = controls[3].text_input("名称/代码", "")
+    display_controls = st.columns([0.8, 1.0, 2.2])
+    max_points = display_controls[0].slider("图中股票数", min_value=5, max_value=20, value=20, step=5)
+    sort_label = display_controls[1].selectbox("展示规则", list(SCATTER_SORT_OPTIONS.keys()))
 
     universe_view = apply_universe_filters(master, track="" if track == "全部" else track, market_name=market, search=name_filter)
     peer_base = peers.drop(columns=[col for col in ["stock_name", "track", "market", "style"] if col in peers.columns])
+    universe_cols = [col for col in ["stock_code", "stock_name", "track", "market", "style", "market_cap_100m"] if col in universe_view.columns]
     scatter_source = peer_base.merge(
-        universe_view[["stock_code", "stock_name", "track", "market", "style"]].drop_duplicates("stock_code"),
+        universe_view[universe_cols].drop_duplicates("stock_code"),
         on="stock_code",
         how="inner",
     )
@@ -504,6 +539,12 @@ def render_scatter_tab(workbench: dict[str, pd.DataFrame]) -> None:
     if missing:
         st.warning(f"当前数据缺少字段：{', '.join(missing)}")
         return
+    candidate_count = len(scatter)
+    scatter = select_scatter_points(scatter, spec, max_points=max_points, mode=SCATTER_SORT_OPTIONS[sort_label])
+    display_controls[2].markdown(
+        f'<div class="dense-note">候选样本 {candidate_count:,} 只，图中显示 {len(scatter):,} 只。先用筛选缩小赛道，再看排序后的代表样本。</div>',
+        unsafe_allow_html=True,
+    )
     fig = px.scatter(
         scatter,
         x=spec["x"],
@@ -511,7 +552,7 @@ def render_scatter_tab(workbench: dict[str, pd.DataFrame]) -> None:
         text="stock_name",
         color="track",
         color_discrete_sequence=PLOTLY_COLORS,
-        hover_data=[col for col in ["stock_code", "industry", "style"] if col in scatter.columns],
+        hover_data=[col for col in ["stock_code", "industry", "style", "market_cap_100m"] if col in scatter.columns],
         labels={spec["x"]: spec["x_label"], spec["y"]: spec["y_label"]},
         height=620,
     )
@@ -557,7 +598,7 @@ def render_scatter_tab(workbench: dict[str, pd.DataFrame]) -> None:
         linecolor=PALETTE["ink"],
     )
     st.plotly_chart(fig, use_container_width=True)
-    st.dataframe(format_master_table(scatter), use_container_width=True, hide_index=True)
+    st.dataframe(format_master_table(scatter), use_container_width=True, hide_index=True, height=360)
 
 
 def render_evidence_score_tab(
@@ -697,6 +738,23 @@ def render_template_tab(workbench: dict[str, pd.DataFrame]) -> None:
     )
     st.dataframe(validation, use_container_width=True, hide_index=True)
     st.markdown('<div class="dense-note">模板只作为无 iFinD 缓存时的兜底示例；正式页面默认读取 data/ifind_workbench 下的本地 parquet。</div>', unsafe_allow_html=True)
+
+
+def paginate_view(frame: pd.DataFrame, key_prefix: str) -> tuple[pd.DataFrame, dict[str, int]]:
+    total = len(frame)
+    if total == 0:
+        return frame, {"start": 0, "end": 0, "total": 0}
+    controls = st.columns([0.5, 0.7, 1.8])
+    page_size = int(controls[0].selectbox("每页行数", [100, 200, 500], index=1, key=f"{key_prefix}_page_size"))
+    total_pages = max(1, int(np.ceil(total / page_size)))
+    page = int(controls[1].number_input("页码", min_value=1, max_value=total_pages, value=1, step=1, key=f"{key_prefix}_page"))
+    start_idx = (page - 1) * page_size
+    end_idx = min(start_idx + page_size, total)
+    controls[2].markdown(
+        f'<div class="dense-note">为保证刷新速度，表格只渲染当前页；完整筛选结果可用“导出”。共 {total_pages:,} 页。</div>',
+        unsafe_allow_html=True,
+    )
+    return frame.iloc[start_idx:end_idx].copy(), {"start": start_idx + 1, "end": end_idx, "total": total}
 
 
 def format_master_table(frame: pd.DataFrame) -> pd.DataFrame:

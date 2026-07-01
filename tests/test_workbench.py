@@ -5,6 +5,7 @@ from earnings_signal.workbench import (
     calculate_dcf,
     normalize_peer_metrics,
     prepare_scatter_data,
+    select_scatter_points,
 )
 
 
@@ -85,3 +86,17 @@ def test_scatter_can_compute_roe_pb():
 
     assert not missing
     assert round(scatter.loc[0, "roe_pb"], 2) == 12.5
+
+
+def test_select_scatter_points_caps_at_twenty():
+    data = pd.DataFrame(
+        [
+            {"stock_code": f"{i:06d}.SZ", "stock_name": f"股票{i}", "roic_pct": float(i), "safety_margin_pct": float(100 - i)}
+            for i in range(50)
+        ]
+    )
+    _, _, spec = prepare_scatter_data(data, "ROIC vs 安全边际")
+
+    selected = select_scatter_points(data, spec, max_points=50)
+
+    assert len(selected) == 20

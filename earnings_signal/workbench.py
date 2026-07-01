@@ -238,6 +238,8 @@ def build_master_table(universe: pd.DataFrame, valuation: pd.DataFrame, peers: p
             "risk_budget_pct",
             "absolute_return_pct",
             "relative_return_pct",
+            "safety_margin_pct",
+            "dcf_auto_safety_margin_pct",
         ]
         if col in peers.columns
     ]
@@ -249,24 +251,49 @@ def build_master_table(universe: pd.DataFrame, valuation: pd.DataFrame, peers: p
 def add_dcf_columns(master: pd.DataFrame, valuation: pd.DataFrame) -> pd.DataFrame:
     if master.empty or valuation.empty:
         return master
-    dcf_rows = []
-    for _, row in valuation.iterrows():
-        try:
-            result = calculate_dcf(row.to_dict())
-            dcf_rows.append(
-                {
-                    "stock_code": row["stock_code"],
-                    "dcf_per_share_value": result.summary["per_share_value"],
-                    "dcf_safety_price": result.summary["safety_price"],
-                    "dcf_current_safety_margin_pct": result.summary["current_safety_margin_pct"],
-                    "dcf_equity_value_100m": result.summary["equity_value_100m"],
-                }
-            )
-        except ValueError:
-            continue
-    if not dcf_rows:
+    frame = valuation.copy()
+    required = {"stock_code", "shares_outstanding_100m", "profit_1y_100m", "fcff_profit_pct", "perpetual_growth_pct", "discount_rate_pct"}
+    if not required.issubset(frame.columns):
         return master
-    return master.merge(pd.DataFrame(dcf_rows), on="stock_code", how="left")
+
+    shares = pd.to_numeric(frame["shares_outstanding_100m"], errors="coerce")
+    price = pd.to_numeric(frame.get("price", pd.Series(np.nan, index=frame.index)), errors="coerce")
+    profit_1y = pd.to_numeric(frame["profit_1y_100m"], errors="coerce")
+    fcff_profit_pct = pd.to_numeric(frame["fcff_profit_pct"], errors="coerce")
+    growth = pd.to_numeric(frame["perpetual_growth_pct"], errors="coerce") / 100.0
+    discount = pd.to_numeric(frame["discount_rate_pct"], errors="coerce") / 100.0
+    safety_margin = pd.to_numeric(frame.get("safety_margin_pct", pd.Series(20.0, index=frame.index)), errors="coerce") / 100.0
+    cash = pd.to_numeric(frame.get("cash_100m", pd.Series(0.0, index=frame.index)), errors="coerce").fillna(0.0)
+    non_core_assets = pd.to_numeric(frame.get("non_core_assets_100m", pd.Series(0.0, index=frame.index)), errors="coerce").fillna(0.0)
+    debt = pd.to_numeric(frame.get("interest_bearing_debt_100m", pd.Series(0.0, index=frame.index)), errors="coerce").fillna(0.0)
+    parent_ratio = pd.to_numeric(frame.get("parent_equity_ratio_pct", pd.Series(100.0, index=frame.index)), errors="coerce").fillna(100.0) / 100.0
+    year_1_fcf = pd.to_numeric(frame.get("next_year_fcf_100m", pd.Series(np.nan, index=frame.index)), errors="coerce")
+    year_1_fcf = year_1_fcf.fillna(profit_1y * fcff_profit_pct / 100.0)
+
+    valid = shares.gt(0) & discount.gt(growth) & year_1_fcf.notna()
+    pv_fcf_sum = pd.Series(np.nan, index=frame.index, dtype="float64")
+    for year in range(1, 11):
+        pv_fcf_sum = pv_fcf_sum.fillna(0.0)
+        pv_fcf_sum = pv_fcf_sum + year_1_fcf * ((1.0 + growth) ** (year - 1)) / ((1.0 + discount) ** year)
+    year_10_fcf = year_1_fcf * ((1.0 + growth) ** 9)
+    terminal_value = year_10_fcf * (1.0 + growth) / (discount - growth)
+    terminal_pv = terminal_value / ((1.0 + discount) ** 10)
+    equity_value = pv_fcf_sum + terminal_pv + cash + non_core_assets - debt
+    attributable_value = equity_value * parent_ratio
+    per_share_value = attributable_value / shares
+    safety_price = per_share_value * (1.0 - safety_margin)
+    current_safety_margin = 1.0 - price / per_share_value
+
+    dcf = pd.DataFrame(
+        {
+            "stock_code": frame["stock_code"],
+            "dcf_per_share_value": per_share_value.where(valid),
+            "dcf_safety_price": safety_price.where(valid),
+            "dcf_current_safety_margin_pct": (current_safety_margin * 100.0).where(valid & price.notna() & per_share_value.ne(0)),
+            "dcf_equity_value_100m": equity_value.where(valid),
+        }
+    )
+    return master.merge(dcf, on="stock_code", how="left")
 
 
 def apply_universe_filters(
@@ -392,6 +419,26 @@ def prepare_scatter_data(frame: pd.DataFrame, chart_name: str) -> tuple[pd.DataF
         return pd.DataFrame(), missing, spec
     data = data.dropna(subset=[spec["x"], spec["y"]])
     return data, [], spec
+
+
+def select_scatter_points(frame: pd.DataFrame, spec: dict[str, Any], max_points: int = 20, mode: str = "balanced") -> pd.DataFrame:
+    if frame.empty:
+        return frame
+    limit = max(1, min(int(max_points), 20))
+    if len(frame) <= limit:
+        return frame.reset_index(drop=True)
+    data = frame.copy()
+    x = pd.to_numeric(data[spec["x"]], errors="coerce")
+    y = pd.to_numeric(data[spec["y"]], errors="coerce")
+    if mode == "y_desc":
+        data["_rank"] = y
+    elif mode == "x_desc":
+        data["_rank"] = x
+    elif mode == "market_cap" and "market_cap_100m" in data:
+        data["_rank"] = pd.to_numeric(data["market_cap_100m"], errors="coerce")
+    else:
+        data["_rank"] = x.rank(pct=True, na_option="bottom") + y.rank(pct=True, na_option="bottom")
+    return data.sort_values("_rank", ascending=False).drop(columns=["_rank"]).head(limit).reset_index(drop=True)
 
 
 def financial_history_for_stock(history: pd.DataFrame, stock_code: str) -> pd.DataFrame:
